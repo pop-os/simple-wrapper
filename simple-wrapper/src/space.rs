@@ -24,7 +24,6 @@ use xdg_shell_wrapper::{
     },
     util::{exec_child, get_client_sock},
 };
-
 use sctk::{
     output::OutputInfo,
     reexports::{
