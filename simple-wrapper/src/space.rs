@@ -422,6 +422,9 @@ impl WrapperSpace for SimpleWrapperSpace {
                 }
             }
         }
+        for top_level in &mut self.client_top_levels {
+            top_level.handle_events();
+        }
 
         if should_render {
             self.render(time);
