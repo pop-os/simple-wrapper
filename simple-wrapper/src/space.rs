@@ -148,7 +148,7 @@ impl SimpleWrapperSpace {
         // aggregate damage of all top levels
         // clear once with aggregated damage
         // redraw each top level using the aggregated damage
-        let mut l_damage = Vec::new();
+        let mut l_damage: Vec<(Rectangle<i32, smithay::utils::Logical>, smithay::utils::Point<i32, smithay::utils::Logical>)> = Vec::new();
         let mut p_damage = Vec::new();
         let clear_color = [0.0, 0.0, 0.0, 0.0];
         let renderer = self.renderer.as_mut().unwrap();
@@ -167,14 +167,14 @@ impl SimpleWrapperSpace {
                             Rectangle::from_loc_and_size(
                                 (0, 0),
                                 (self.dimensions.0 as i32, self.dimensions.1 as i32),
-                            ).to_physical(1),
+                            ),
                             (0, 0).into(),
                         )];
                         p_damage = l_damage
                             .iter()
                             .map(|(d, o)| {
-                                let mut d = *d;
-                                d.loc += *o;
+                                let mut d = d.to_physical(1);
+                                d.loc += o.to_physical(1);
                                 d
                             })
                             .collect::<Vec<_>>();
@@ -201,7 +201,7 @@ impl SimpleWrapperSpace {
                         if top_level.dirty || full_clear {
                             if !full_clear {
                                 let surface_tree_damage =
-                                    damage_from_surface_tree(server_surface, (0.0, 0.0), 1.0, None);
+                                    damage_from_surface_tree(server_surface, (0, 0), None);
 
                                 l_damage = if surface_tree_damage.is_empty() {
                                     vec![Rectangle::from_loc_and_size(
@@ -210,19 +210,19 @@ impl SimpleWrapperSpace {
                                             top_level.rectangle.size.w as i32,
                                             top_level.rectangle.size.h as i32,
                                         ),
-                                    ).to_physical(1)]
+                                    )]
                                 } else {
                                     surface_tree_damage
                                 }
                                 .into_iter()
-                                .map(|d| (d, top_level.rectangle.loc.to_physical(1)))
+                                .map(|d| (d, top_level.rectangle.loc))
                                 .collect();
                                 let mut cur_p_damage = l_damage
                                     .iter()
                                     .map(|(d, o)| {
                                         let mut d = *d;
                                         d.loc += *o;
-                                        d
+                                        d.to_physical(1)
                                     })
                                     .collect::<Vec<_>>();
 
@@ -232,7 +232,7 @@ impl SimpleWrapperSpace {
                                     .map(|d| d.to_f64())
                                     .collect::<Vec<_>>();
                                 frame
-                                    .clear(clear_color, &p_damage_f64)
+                                    .clear(clear_color, &p_damage_f64.as_slice())
                                     .expect("Failed to clear frame.");
 
                                 p_damage.append(&mut cur_p_damage);
@@ -243,7 +243,7 @@ impl SimpleWrapperSpace {
                                 frame,
                                 server_surface,
                                 1.0,
-                                loc.to_f64().to_physical(1.0),
+                                loc,
                                 l_damage.iter().map(|d| d.0).collect_vec().as_slice(),
                                 &log_clone,
                             )
@@ -290,8 +290,8 @@ impl SimpleWrapperSpace {
                         (width, height).into(),
                         smithay::utils::Transform::Flipped180,
                         |self_: &mut Gles2Renderer, frame| {
-                            let damage = smithay::utils::Rectangle::<i32, smithay::utils::Physical> {
-                                loc: loc.to_physical(1),
+                            let damage = smithay::utils::Rectangle::<i32, smithay::utils::Logical> {
+                                loc: loc,
                                 size: (width, height).into(),
                             };
 
@@ -312,7 +312,7 @@ impl SimpleWrapperSpace {
                                 frame,
                                 wl_surface,
                                 1.0,
-                                loc.to_f64().to_physical(1.0),
+                                loc,
                                 &[damage],
                                 &logger,
                             )
