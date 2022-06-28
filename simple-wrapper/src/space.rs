@@ -167,7 +167,6 @@ impl SimpleWrapperSpace {
         (w.try_into().unwrap(), h.try_into().unwrap()).into()
     }
 
-    // TODO cleanup
     fn render(&mut self, dh: &DisplayHandle, time: u32) {
         if self.next_render_event.get() != None {
             return;
@@ -179,35 +178,43 @@ impl SimpleWrapperSpace {
             .expect("Failed to bind surface to GL");
 
         let log_clone = self.log.clone().unwrap();
-        for w in self.space.windows() {
-            let mut damage = if self.full_clear {
-                vec![(w.bbox().to_physical(1))]
-            } else {
-                let g = w.geometry();
-
-                // TODO handle scaling
-                w.accumulated_damage(g.loc.to_f64().to_physical(1.0), 1.0, None)
-            };
-            let mut damage = vec![(w.bbox().to_physical(1))];
-            dbg!(&damage);
-            let _ = renderer.render(
-                self.dimensions.to_physical(1),
-                smithay::utils::Transform::Flipped180,
-                |renderer: &mut Gles2Renderer, frame| {
-                    frame
-                        .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
-                        .expect("Failed to clear frame.");
-                    let _ =
-                        draw_window(dh, renderer, frame, w, 1.0, (0.0, 0.0), &damage, &log_clone);
-                },
-            );
-            self.egl_surface
-                .as_ref()
-                .unwrap()
-                .swap_buffers(Some(&mut damage))
-                .expect("Failed to swap buffers.");
+        let outputs = self.space.outputs().cloned().collect_vec();
+        for o in outputs {
+            for w in self.space.windows() {
+                let mut damage = if self.full_clear {
+                    vec![(w.bbox().to_physical(1))]
+                } else {
+                    let g = w.geometry();
+    
+                    // TODO handle scaling
+                    w.accumulated_damage(g.loc.to_f64().to_physical(1.0), 1.0, Some((&self.space, &o)))
+                };
+    
+                if damage.len() == 0 {
+                    continue;
+                }
+                dbg!(&damage);
+    
+                let _ = renderer.render(
+                    self.dimensions.to_physical(1),
+                    smithay::utils::Transform::Flipped180,
+                    |renderer: &mut Gles2Renderer, frame| {
+                        frame
+                            .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
+                            .expect("Failed to clear frame.");
+                        let _ =
+                            draw_window(dh, renderer, frame, w, 1.0, (0.0, 0.0), &damage, &log_clone);
+                    },
+                );
+                self.egl_surface
+                    .as_ref()
+                    .unwrap()
+                    .swap_buffers(Some(&mut damage))
+                    .expect("Failed to swap buffers.");
+            }    
         }
-        renderer.unbind();
+        let _ = renderer.unbind();
+        self.full_clear = false;
     }
 }
 
