@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::fs::File;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use smithay::reexports::wayland_protocols::wlr::unstable::layer_shell::v1::client::{
+use sctk::reexports::protocols::wlr::unstable::layer_shell::v1::client::{
     zwlr_layer_shell_v1, zwlr_layer_surface_v1,
 };
+use serde::{Deserialize, Serialize};
+
 use std::ops::Range;
 use xdg::BaseDirectories;
 use xdg_shell_wrapper::config::{KeyboardInteractivity, Layer, WrapperConfig};
@@ -150,9 +151,7 @@ impl SimpleWrapperConfig {
         let mut configs = Self::configs();
         configs.insert(name.into(), SimpleWrapperConfig::default());
         let xdg = BaseDirectories::new()?;
-        let f = xdg
-            .place_config_file("simple-wrapper/config.ron")
-            .unwrap();
+        let f = xdg.place_config_file("simple-wrapper/config.ron").unwrap();
         let f = File::create(f)?;
         ron::ser::to_writer_pretty(&f, &configs, ron::ser::PrettyConfig::default())?;
         return Ok(());

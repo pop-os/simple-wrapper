@@ -5,7 +5,7 @@ use shlex::Shlex;
 use simple_wrapper_config::SimpleWrapperConfig;
 use slog::{o, trace, Drain};
 use std::process::Command;
-use xdg_shell_wrapper::xdg_wrapper;
+use xdg_shell_wrapper::run;
 
 use crate::space::SimpleWrapperSpace;
 
@@ -56,6 +56,6 @@ fn main() -> Result<()> {
         trace!(log, "child argument: {}", &arg);
         child.arg(arg);
     }
-    xdg_wrapper(SimpleWrapperSpace::new(config, log))?;
+    run(SimpleWrapperSpace::new(config, log))?;
     Ok(())
 }
