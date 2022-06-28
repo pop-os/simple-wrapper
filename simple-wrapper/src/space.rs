@@ -52,15 +52,15 @@ use smithay::{
     },
     desktop::{
         draw_window,
-        space::SurfaceTree,
+        space::{RenderError, SurfaceTree},
         utils::{damage_from_surface_tree, send_frames_surface_tree},
         Kind, PopupKind, PopupManager, Space, Window, WindowSurfaceType,
     },
     nix::{fcntl, libc},
-    reexports::wayland_server::{
+    reexports::{wayland_server::{
         self, protocol::wl_surface::WlSurface as s_WlSurface, Client, Display as s_Display,
         DisplayHandle,
-    },
+    }, wayland_protocols::xdg::shell::server::xdg_toplevel},
     utils::{Logical, Rectangle, Size},
     wayland::{
         shell::xdg::{PopupSurface, PositionerState},
@@ -167,9 +167,9 @@ impl SimpleWrapperSpace {
         (w.try_into().unwrap(), h.try_into().unwrap()).into()
     }
 
-    fn render(&mut self, dh: &DisplayHandle, time: u32) {
+    fn render(&mut self, dh: &DisplayHandle, time: u32) -> Result<(), RenderError<Gles2Renderer>> {
         if self.next_render_event.get() != None {
-            return;
+            return Ok(());
         }
         let clear_color = [0.0, 0.0, 0.0, 0.0];
         let renderer = self.renderer.as_mut().unwrap();
@@ -178,43 +178,86 @@ impl SimpleWrapperSpace {
             .expect("Failed to bind surface to GL");
 
         let log_clone = self.log.clone().unwrap();
-        let outputs = self.space.outputs().cloned().collect_vec();
-        for o in outputs {
-            for w in self.space.windows() {
-                let mut damage = if self.full_clear {
-                    vec![(w.bbox().to_physical(1))]
-                } else {
-                    let g = w.geometry();
-    
-                    // TODO handle scaling
-                    w.accumulated_damage(g.loc.to_f64().to_physical(1.0), 1.0, Some((&self.space, &o)))
-                };
-    
-                if damage.len() == 0 {
-                    continue;
-                }
-                // dbg!(&damage);
-                let _ = renderer.render(
-                    self.dimensions.to_physical(1),
-                    smithay::utils::Transform::Flipped180,
-                    |renderer: &mut Gles2Renderer, frame| {
-                        frame
-                            .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
-                            .expect("Failed to clear frame.");
-                        let _ =
-                            draw_window(dh, renderer, frame, w, 1.0, (0.0, 0.0), &damage, &log_clone);
-                    },
-                );
-                self.egl_surface
-                    .as_ref()
-                    .unwrap()
-                    .swap_buffers(Some(&mut damage))
-                    .expect("Failed to swap buffers.");
-            }    
+        if let Some(o) = self.space
+        .windows()
+        .find_map(|w| self.space.outputs_for_window(w).pop()) {
+            let output_size = o.current_mode().ok_or(RenderError::OutputNoMode)?.size;
+            // let output_scale = o.current_scale().fractional_scale();
+            // We explicitly use ceil for the output geometry size to make sure the damage
+            // spans at least the output size. Round and floor would result in parts not drawn as the
+            // frame size could be bigger than the maximum the output_geo would define.
+            let output_geo = Rectangle::from_loc_and_size(o.current_location(), output_size.to_logical(1));
+
+            let mut damage = if self.full_clear {
+                vec![(Rectangle::from_loc_and_size((0, 0), self.dimensions.to_physical(1)))]
+            } else {
+                let mut acc_damage = self.space.windows().fold(vec![], |acc, w| {
+                    acc.into_iter()
+                        .chain(w.accumulated_damage(
+                            w.geometry().loc.to_f64().to_physical(1.0),
+                            1.0,
+                            Some((&self.space, &o)),
+                        ))
+                        .collect_vec()
+                });
+                acc_damage.dedup();
+                acc_damage.retain(|rect| rect.overlaps(output_geo.to_physical(1)));
+                acc_damage.retain(|rect| rect.size.h > 0 && rect.size.w > 0);
+                // merge overlapping rectangles
+                acc_damage = acc_damage
+                    .into_iter()
+                    .fold(Vec::new(), |new_damage, mut rect| {
+                        // replace with drain_filter, when that becomes stable to reuse the original Vec's memory
+                        let (overlapping, mut new_damage): (Vec<_>, Vec<_>) = new_damage
+                            .into_iter()
+                            .partition(|other| other.overlaps(rect));
+
+                        for overlap in overlapping {
+                            rect = rect.merge(overlap);
+                        }
+                        new_damage.push(rect);
+                        new_damage
+                    });
+                acc_damage
+            };
+
+            let _ = renderer.render(
+                self.dimensions.to_physical(1),
+                smithay::utils::Transform::Flipped180,
+                |renderer: &mut Gles2Renderer, frame| {
+                    frame
+                        .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
+                        .expect("Failed to clear frame.");
+                    for w in self.space.windows() {
+                        let mut w_damage = damage.iter().filter_map(|r| r.intersection(w.bbox().to_physical(1))).collect_vec();
+                        w_damage.dedup();
+                        if damage.len() == 0 {
+                            continue;
+                        }
+
+                        let _ = draw_window(
+                            dh,
+                            renderer,
+                            frame,
+                            w,
+                            1.0,
+                            w.geometry().loc.to_f64().to_physical(1.0),
+                            &w_damage,
+                            &log_clone,
+                        );
+                    }
+                },
+            );
+            self.egl_surface
+            .as_ref()
+            .unwrap()
+            .swap_buffers(Some(&mut damage))
+            .expect("Failed to swap buffers.");
         }
         let _ = renderer.unbind();
         self.space.send_frames(time);
         self.full_clear = false;
+        Ok(())
     }
 }
 
@@ -233,6 +276,38 @@ impl WrapperSpace for SimpleWrapperSpace {
                 "Child processes exited. Now exiting..."
             );
             std::process::exit(0);
+        }
+        let windows = self.space.windows().cloned().collect_vec();
+        // for w in &windows {
+
+        //     dbg!(
+        //         w.geometry(),
+        //         match w.toplevel() {
+        //             Kind::Xdg(t) => t.current_state().states.contains(xdg_toplevel::State::Activated),
+        //         }
+        //     );
+        // }
+        if !windows.iter().any(|w| {
+            match w.toplevel() {
+                Kind::Xdg(t) => t.current_state().states.contains(xdg_toplevel::State::Activated),
+            }
+        }) {
+            if let Some(w) = windows.iter().next() {
+                self.space.raise_window(w, true);
+                self.space.commit(w.toplevel().wl_surface());
+                self.space.refresh(dh);
+                for w in self.space.windows() {
+                    w.configure();
+                }
+                self.dirty_window(w.toplevel().wl_surface());
+            } else if self.last_dirty.is_some() {
+                info!(
+                    self.log.as_ref().unwrap().clone(),
+                    "Child processes exited. Now exiting..."
+                );
+                self.child.as_mut().unwrap().kill().unwrap();
+                std::process::exit(0);
+            }
         }
         let mut should_render = false;
         match self.next_render_event.take() {
@@ -285,7 +360,7 @@ impl WrapperSpace for SimpleWrapperSpace {
         }
 
         if should_render {
-            self.render(dh, time);
+            let _ = self.render(dh, time);
         }
         if self.egl_surface.as_ref().unwrap().get_size() != Some(self.dimensions.to_physical(1)) {
             self.full_clear = true;
@@ -304,13 +379,18 @@ impl WrapperSpace for SimpleWrapperSpace {
 
     fn add_top_level(&mut self, w: Window) {
         self.full_clear = true;
-
         let wl_surface = w.toplevel().wl_surface().clone();
-        self.focused_surface.borrow_mut().replace(wl_surface.clone());
         self.space.map_window(&w, (0, 0), true);
-        self.space.commit(&wl_surface);
+        self.space.raise_window(&w, true);
+        for w in self.space.windows() {
+            w.configure();
+        }
+        self.focused_surface
+            .borrow_mut()
+            .replace(wl_surface);
     }
 
+    // TODO
     fn add_popup(
         &mut self,
         _: &Environment<Env>,
@@ -364,7 +444,6 @@ impl WrapperSpace for SimpleWrapperSpace {
 
     ///  update active window based on pointer location
     fn update_pointer(&mut self, (x, y): (i32, i32)) {
-        let point = (x, y);
         // set new focused
         if let Some((_, s, _)) = self
             .space
@@ -477,7 +556,10 @@ impl WrapperSpace for SimpleWrapperSpace {
 
         layer_surface.set_anchor(self.config.anchor.into());
         layer_surface.set_keyboard_interactivity(self.config.keyboard_interactivity());
-        layer_surface.set_size(dimensions.w.try_into().unwrap(), dimensions.h.try_into().unwrap());
+        layer_surface.set_size(
+            dimensions.w.try_into().unwrap(),
+            dimensions.h.try_into().unwrap(),
+        );
 
         // Commit so that the server will send a configure event
         c_surface.commit();
@@ -653,8 +735,11 @@ impl WrapperSpace for SimpleWrapperSpace {
 
     fn dirty_window(&mut self, s: &s_WlSurface) {
         if let Some(w) = self.space.window_for_surface(s, WindowSurfaceType::ALL) {
-            let size = self.constrain_dim(w.geometry().size);
-            if self.dimensions != size {
+            let size = self.constrain_dim(w.bbox().size);
+            let activated = match w.toplevel() {
+                Kind::Xdg(t) => t.current_state().states.contains(xdg_toplevel::State::Activated),
+            };
+            if activated && self.dimensions != size {
                 if let Some((_, _)) = &self.output {
                     // TODO improve this for when there are changes to the lists of plugins while running
                     let size = self.constrain_dim(size);
@@ -676,16 +761,14 @@ impl WrapperSpace for SimpleWrapperSpace {
                         && pending_dimensions.w < size.w
                         && wait_configure_dim.0 < size.w
                     {
-                        self.pending_dimensions =
-                            Some((size.w, wait_configure_dim.1).into());
+                        self.pending_dimensions = Some((size.w, wait_configure_dim.1).into());
                         wait_configure_dim.0 = size.w;
                     }
                     if self.dimensions.h < size.h
                         && pending_dimensions.h < size.h
                         && wait_configure_dim.1 < size.h
                     {
-                        self.pending_dimensions =
-                            Some((wait_configure_dim.0, size.h).into());
+                        self.pending_dimensions = Some((wait_configure_dim.0, size.h).into());
                     }
                 } else {
                     if self
@@ -714,9 +797,3 @@ impl WrapperSpace for SimpleWrapperSpace {
 
     fn dirty_popup(&mut self, s: &s_WlSurface) {}
 }
-
-// impl Drop for SimpleWrapperSpace {
-//     fn drop(&mut self) {
-//         self.destroy();
-//     }
-// }
