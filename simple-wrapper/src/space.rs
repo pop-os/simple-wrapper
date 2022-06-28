@@ -193,8 +193,7 @@ impl SimpleWrapperSpace {
                 if damage.len() == 0 {
                     continue;
                 }
-                dbg!(&damage);
-    
+                // dbg!(&damage);
                 let _ = renderer.render(
                     self.dimensions.to_physical(1),
                     smithay::utils::Transform::Flipped180,
@@ -214,6 +213,7 @@ impl SimpleWrapperSpace {
             }    
         }
         let _ = renderer.unbind();
+        self.space.send_frames(time);
         self.full_clear = false;
     }
 }
@@ -250,8 +250,6 @@ impl WrapperSpace for SimpleWrapperSpace {
                 height,
                 serial: _serial,
             }) => {
-                dbg!(width, height, self.pending_dimensions);
-
                 if self.dimensions != (width as i32, height as i32).into()
                     && self.pending_dimensions.is_none()
                 {
@@ -305,9 +303,10 @@ impl WrapperSpace for SimpleWrapperSpace {
     }
 
     fn add_top_level(&mut self, w: Window) {
-        dbg!(&w);
         self.full_clear = true;
+
         let wl_surface = w.toplevel().wl_surface().clone();
+        self.focused_surface.borrow_mut().replace(wl_surface.clone());
         self.space.map_window(&w, (0, 0), true);
         self.space.commit(&wl_surface);
     }
@@ -655,7 +654,6 @@ impl WrapperSpace for SimpleWrapperSpace {
     fn dirty_window(&mut self, s: &s_WlSurface) {
         if let Some(w) = self.space.window_for_surface(s, WindowSurfaceType::ALL) {
             let size = self.constrain_dim(w.geometry().size);
-            dbg!(size);
             if self.dimensions != size {
                 if let Some((_, _)) = &self.output {
                     // TODO improve this for when there are changes to the lists of plugins while running
