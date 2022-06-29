@@ -2,14 +2,13 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::ops::Range;
 
 use anyhow::Result;
 use sctk::reexports::protocols::wlr::unstable::layer_shell::v1::client::{
     zwlr_layer_shell_v1, zwlr_layer_surface_v1,
 };
 use serde::{Deserialize, Serialize};
-
-use std::ops::Range;
 use xdg::BaseDirectories;
 use xdg_shell_wrapper::config::{KeyboardInteractivity, Layer, WrapperConfig};
 

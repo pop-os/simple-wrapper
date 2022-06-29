@@ -18,22 +18,21 @@ use sctk::{
     environment::Environment,
     output::OutputInfo,
     reexports::{
-        client::protocol::{wl_output as c_wl_output, wl_surface as c_wl_surface},
         client::{self, Attached, Main},
+        client::protocol::{wl_output as c_wl_output, wl_surface as c_wl_surface},
         protocols::{
             wlr::unstable::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1},
             xdg_shell::client::{
                 xdg_popup,
                 xdg_positioner::{Anchor, Gravity, XdgPositioner},
                 xdg_surface::{self, XdgSurface},
-                xdg_wm_base::XdgWmBase,
+                xdg_wm_base::{XdgWmBase, self},
             },
         },
     },
     shm::AutoMemPool,
 };
-use simple_wrapper_config::SimpleWrapperConfig;
-use slog::{info, trace, Logger};
+use slog::{info, Logger, trace};
 use smithay::{
     backend::{
         egl::{
@@ -46,34 +45,36 @@ use smithay::{
             surface::EGLSurface,
         },
         renderer::{
-            gles2::Gles2Renderer, utils::draw_surface_tree, Bind, Frame, ImportEgl, Renderer,
-            Unbind,
+            Bind, Frame, gles2::Gles2Renderer, ImportEgl, Renderer, Unbind,
+            utils::draw_surface_tree,
         },
     },
     desktop::{
         draw_window,
-        space::{RenderError, SurfaceTree},
-        utils::{damage_from_surface_tree, send_frames_surface_tree},
-        Kind, PopupKind, PopupManager, Space, Window, WindowSurfaceType,
+        Kind,
+        PopupKind,
+        PopupManager, space::{RenderError, SurfaceTree}, Space, utils::{damage_from_surface_tree, send_frames_surface_tree, bbox_from_surface_tree}, Window, WindowSurfaceType, draw_popups,
     },
     nix::{fcntl, libc},
-    reexports::{wayland_server::{
-        self, protocol::wl_surface::WlSurface as s_WlSurface, Client, Display as s_Display,
-        DisplayHandle,
-    }, wayland_protocols::xdg::shell::server::xdg_toplevel},
-    utils::{Logical, Rectangle, Size},
+    reexports::{wayland_protocols::xdg::shell::server::xdg_toplevel, wayland_server::{
+        self, Client, Display as s_Display, DisplayHandle,
+        protocol::wl_surface::WlSurface as s_WlSurface,
+    }},
+    utils::{Logical, Rectangle, Size, Point},
     wayland::{
-        shell::xdg::{PopupSurface, PositionerState},
         SERIAL_COUNTER,
+        shell::xdg::{PopupSurface, PositionerState},
     },
 };
 use wayland_egl::WlEglSurface;
 use xdg_shell_wrapper::{
     client_state::{Env, Focus},
     config::WrapperConfig,
-    space::{ClientEglSurface, SpaceEvent, Visibility, WrapperSpace},
+    space::{ClientEglSurface, SpaceEvent, Visibility, WrapperSpace, Popup, PopupState},
     util::{exec_child, get_client_sock},
 };
+
+use simple_wrapper_config::SimpleWrapperConfig;
 
 impl Default for SimpleWrapperSpace {
     fn default() -> Self {
@@ -99,6 +100,7 @@ impl Default for SimpleWrapperSpace {
             layer_surface: Default::default(),
             egl_surface: Default::default(),
             layer_shell_wl_surface: Default::default(),
+            popups: Default::default(),
         }
     }
 }
@@ -131,6 +133,7 @@ pub struct SimpleWrapperSpace {
     pub(crate) layer_surface: Option<Main<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>>,
     pub(crate) egl_surface: Option<Rc<EGLSurface>>,
     pub(crate) layer_shell_wl_surface: Option<Attached<c_wl_surface::WlSurface>>,
+    pub(crate) popups: Vec<Popup>
 }
 
 impl SimpleWrapperSpace {
@@ -179,9 +182,10 @@ impl SimpleWrapperSpace {
 
         let log_clone = self.log.clone().unwrap();
         if let Some(o) = self.space
-        .windows()
-        .find_map(|w| self.space.outputs_for_window(w).pop()) {
+            .windows()
+            .find_map(|w| self.space.outputs_for_window(w).pop()) {
             let output_size = o.current_mode().ok_or(RenderError::OutputNoMode)?.size;
+            // TODO handle fractional scaling?
             // let output_scale = o.current_scale().fractional_scale();
             // We explicitly use ceil for the output geometry size to make sure the damage
             // spans at least the output size. Round and floor would result in parts not drawn as the
@@ -249,13 +253,62 @@ impl SimpleWrapperSpace {
                 },
             );
             self.egl_surface
-            .as_ref()
-            .unwrap()
-            .swap_buffers(Some(&mut damage))
-            .expect("Failed to swap buffers.");
+                .as_ref()
+                .unwrap()
+                .swap_buffers(Some(&mut damage))
+                .expect("Failed to swap buffers.");
+
+            // Popup rendering
+            for p in self.popups.iter_mut().filter(|p| 
+                p.dirty && match p.popup_state.get() {
+                    None => true,
+                    _ => false,
+                }
+            ) {
+                let _ = renderer.unbind();
+                renderer
+                .bind(p.egl_surface.clone())
+                .expect("Failed to bind surface to GL");
+                let p_bbox = bbox_from_surface_tree(p.s_surface.wl_surface(), (0,0));
+                let mut damage = if self.full_clear {
+                    vec![p_bbox.to_physical(1)]
+                } else {
+                    damage_from_surface_tree(p.s_surface.wl_surface(), p_bbox.loc.to_f64().to_physical(1.0), 1.0, Some((&self.space, &o)))
+                };
+                if damage.len() == 0 {
+                    continue;
+                }
+
+                let _ = renderer.render(
+                    p_bbox.size.to_physical(1),
+                    smithay::utils::Transform::Flipped180,
+                    |renderer: &mut Gles2Renderer, frame| {
+                        frame
+                            .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
+                            .expect("Failed to clear frame.");
+
+
+                        let _ = draw_surface_tree(
+                            dh,
+                            renderer,
+                            frame,
+                            p.s_surface.wl_surface(),
+                            1.0,
+                            p_bbox.loc.to_f64().to_physical(1.0),
+                            &damage,
+                            &log_clone,
+                        );
+                    },
+                );
+                p.egl_surface
+                .swap_buffers(Some(&mut damage))
+                .expect("Failed to swap buffers.");
+                p.dirty = false;
+            }
         }
-        let _ = renderer.unbind();
+
         self.space.send_frames(time);
+        let _ = renderer.unbind();
         self.full_clear = false;
         Ok(())
     }
@@ -321,10 +374,10 @@ impl WrapperSpace for SimpleWrapperSpace {
                 }
             }
             Some(SpaceEvent::Configure {
-                width,
-                height,
-                serial: _serial,
-            }) => {
+                     width,
+                     height,
+                     serial: _serial,
+                 }) => {
                 if self.dimensions != (width as i32, height as i32).into()
                     && self.pending_dimensions.is_none()
                 {
@@ -359,6 +412,10 @@ impl WrapperSpace for SimpleWrapperSpace {
             }
         }
 
+        self.popups.retain_mut(|p: &mut Popup| {
+            p.handle_events(&mut self.popup_manager)
+        });
+
         if should_render {
             let _ = self.render(dh, time);
         }
@@ -390,51 +447,143 @@ impl WrapperSpace for SimpleWrapperSpace {
             .replace(wl_surface);
     }
 
-    // TODO
+    fn point_to_compositor_space(&self, c_wl_surface: &c_wl_surface::WlSurface, point: Point<i32, Logical>) -> Point<i32, Logical> {
+        if let Some(p) = self.popups.iter().find(|p| p.c_wl_surface == *c_wl_surface) {
+            bbox_from_surface_tree(p.s_surface.wl_surface(), point).loc
+        } else {
+            point
+        }
+    }
+
     fn add_popup(
         &mut self,
-        _: &Environment<Env>,
-        _: &Attached<XdgWmBase>,
+        env: &Environment<Env>,
+        xdg_wm_base: &Attached<XdgWmBase>,
         s_surface: PopupSurface,
-        _: Main<XdgPositioner>,
-        _: PositionerState,
+        positioner: Main<XdgPositioner>,
+        PositionerState { rect_size, anchor_rect, anchor_edges, gravity, constraint_adjustment, offset, reactive, parent_size, parent_configure }: PositionerState,
     ) {
         self.close_popups();
+
+        let s = if let Some(s) = self.space.windows().find(|w| {
+            match w.toplevel() {
+                Kind::Xdg(wl_s) => Some(wl_s.wl_surface()) == s_surface.get_parent_surface().as_ref(),
+            }
+        }) {
+            s
+        } else {
+            return;
+        };
+
+        let c_wl_surface = env.create_surface().detach();
+        let c_xdg_surface = xdg_wm_base.get_xdg_surface(&c_wl_surface);
+
         let wl_surface = s_surface.wl_surface().clone();
-        let _ = self.popup_manager.track_popup(PopupKind::Xdg(s_surface));
+        let s_popup_surface = s_surface.clone();
+        let _ = self.popup_manager.track_popup(PopupKind::Xdg(s_surface.clone()));
         self.popup_manager.commit(&wl_surface);
-        // let parent_g = if let Some(s) = self.space.windows().find(|s| Some(s.toplevel().wl_surface()) == s_surface.get_parent_surface().as_ref()) {
-        //     s.geometry()
-        // } else {
-        //     return;
-        // };
 
-        // positioner.set_size(rect_size.w, rect_size.h);
-        // positioner.set_anchor_rect(
-        //     anchor_rect.loc.x + parent_g.loc.x,
-        //     anchor_rect.loc.y + parent_g.loc.y,
-        //     anchor_rect.size.w,
-        //     anchor_rect.size.h,
-        // );
-        // positioner.set_anchor(Anchor::from_raw(anchor_edges as u32).unwrap_or(Anchor::None));
-        // positioner.set_gravity(Gravity::from_raw(gravity as u32).unwrap_or(Gravity::None));
 
-        // positioner.set_constraint_adjustment(u32::from(constraint_adjustment));
-        // positioner.set_offset(offset.x, offset.y);
-        // if positioner.as_ref().version() >= 3 {
-        //     if reactive {
-        //         positioner.set_reactive();
-        //     }
-        //     if let Some(parent_size) = parent_size {
-        //         positioner.set_parent_size(parent_size.w, parent_size.h);
-        //     }
-        // }
+        positioner.set_size(rect_size.w, rect_size.h);
+        positioner.set_anchor_rect(
+            anchor_rect.loc.x + s.geometry().loc.x,
+            anchor_rect.loc.y + s.geometry().loc.y,
+            anchor_rect.size.w,
+            anchor_rect.size.h,
+        );
+        positioner.set_anchor(Anchor::from_raw(anchor_edges as u32).unwrap_or(Anchor::None));
+        positioner.set_gravity(Gravity::from_raw(gravity as u32).unwrap_or(Gravity::None));
+
+        positioner.set_constraint_adjustment(u32::from(constraint_adjustment));
+        positioner.set_offset(offset.x, offset.y);
+        if positioner.as_ref().version() >= 3 {
+            if reactive {
+                positioner.set_reactive();
+            }
+            if let Some(parent_size) = parent_size {
+                positioner.set_parent_size(parent_size.w, parent_size.h);
+            }
+        }
+        let c_popup = c_xdg_surface.get_popup(None, &positioner);
+        self.layer_surface.as_ref().unwrap().get_popup(&c_popup);
+
+        //must be done after role is assigned as popup
+        c_wl_surface.commit();
+
+        let cur_popup_state = Rc::new(Cell::new(Some(PopupState::WaitConfigure)));
+        c_xdg_surface.quick_assign(move |c_xdg_surface, e, _| {
+            if let xdg_surface::Event::Configure { serial, .. } = e {
+                c_xdg_surface.ack_configure(serial);
+            }
+        });
+
+        let popup_state = cur_popup_state.clone();
+
+        c_popup.quick_assign(move |_c_popup, e, _| {
+            if let Some(PopupState::Closed) = popup_state.get().as_ref() {
+                return;
+            }
+
+            match e {
+                xdg_popup::Event::Configure {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    if popup_state.get() != Some(PopupState::Closed) {
+                        let _ = s_popup_surface.send_configure();
+                        popup_state.set(Some(PopupState::Configure {
+                            x,
+                            y,
+                            width,
+                            height,
+                        }));
+                    }
+                }
+                xdg_popup::Event::PopupDone => {
+                    popup_state.set(Some(PopupState::Closed));
+                }
+                xdg_popup::Event::Repositioned { token } => {
+                    popup_state.set(Some(PopupState::Repositioned(token)));
+                }
+                _ => {}
+            };
+        });
+        let client_egl_surface = ClientEglSurface {
+            wl_egl_surface: WlEglSurface::new(&c_wl_surface, rect_size.w, rect_size.h),
+            display: self.c_display.as_ref().unwrap().clone(),
+        };
+
+        let egl_context = self.renderer.as_ref().unwrap().egl_context();
+        let egl_surface = Rc::new(
+            EGLSurface::new(
+                &self.egl_display.as_ref().unwrap(),
+                egl_context
+                    .pixel_format()
+                    .expect("Failed to get pixel format from EGL context "),
+                egl_context.config_id(),
+                client_egl_surface,
+                self.log.clone(),
+            )
+            .expect("Failed to initialize EGL Surface"),
+        );
+
+        self.popups.push(Popup {
+            c_popup,
+            c_xdg_surface,
+            c_wl_surface: c_wl_surface,
+            s_surface,
+            egl_surface,
+            dirty: false,
+            popup_state: cur_popup_state,
+        });
     }
 
     fn close_popups(&mut self) {
         for w in &mut self.space.windows() {
             for (PopupKind::Xdg(p), _) in
-                PopupManager::popups_for_surface(w.toplevel().wl_surface())
+            PopupManager::popups_for_surface(w.toplevel().wl_surface())
             {
                 p.send_popup_done();
                 self.popup_manager.commit(p.wl_surface());
@@ -495,14 +644,14 @@ impl WrapperSpace for SimpleWrapperSpace {
                             let fd_flags = fcntl::FdFlag::from_bits(
                                 fcntl::fcntl(raw_fd, fcntl::FcntlArg::F_GETFD).unwrap(),
                             )
-                            .unwrap();
+                                .unwrap();
                             fcntl::fcntl(
                                 raw_fd,
                                 fcntl::FcntlArg::F_SETFD(
                                     fd_flags.difference(fcntl::FdFlag::FD_CLOEXEC),
                                 ),
                             )
-                            .unwrap();
+                                .unwrap();
                             fs::read_to_string(&path).ok().and_then(|bytes| {
                                 if let Ok(entry) = DesktopEntry::decode(&path, &bytes) {
                                     if let Some(exec) = entry.exec() {
@@ -622,7 +771,7 @@ impl WrapperSpace for SimpleWrapperSpace {
             Default::default(),
             log.clone(),
         )
-        .expect("Failed to initialize EGL context");
+            .expect("Failed to initialize EGL context");
 
         let mut min_interval_attr = 23239;
         unsafe {
@@ -652,7 +801,7 @@ impl WrapperSpace for SimpleWrapperSpace {
                 client_egl_surface,
                 log.clone(),
             )
-            .expect("Failed to initialize EGL Surface"),
+                .expect("Failed to initialize EGL Surface"),
         );
 
         let next_render_event_handle = next_render_event.clone();
@@ -795,5 +944,10 @@ impl WrapperSpace for SimpleWrapperSpace {
         }
     }
 
-    fn dirty_popup(&mut self, s: &s_WlSurface) {}
+    fn dirty_popup(&mut self, s: &s_WlSurface) {
+        if let Some(p) = self.popups.iter_mut().find(|p| p.s_surface.wl_surface() == s) {
+            p.dirty = true;
+            self.popup_manager.commit(s);
+        }
+    }
 }

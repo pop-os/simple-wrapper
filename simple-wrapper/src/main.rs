@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0-only
 
+use std::process::Command;
+
 use anyhow::Result;
 use shlex::Shlex;
-use simple_wrapper_config::SimpleWrapperConfig;
-use slog::{o, trace, Drain};
-use std::process::Command;
+use slog::{Drain, o, trace};
 use xdg_shell_wrapper::run;
+
+use simple_wrapper_config::SimpleWrapperConfig;
 
 use crate::space::SimpleWrapperSpace;
 
