@@ -451,15 +451,6 @@ impl WrapperSpace for SimpleWrapperSpace {
             .replace(wl_surface);
     }
 
-    fn point_to_compositor_space(&self, c_wl_surface: &c_wl_surface::WlSurface, point: Point<i32, Logical>) -> Point<i32, Logical> {
-        if let Some(p) = self.popups.iter().find(|p| p.c_wl_surface == *c_wl_surface) {
-            // dbg!(PopupKind::Xdg(p.s_surface.clone()).geometry(), &point);
-            bbox_from_surface_tree(p.s_surface.wl_surface(), point + p.position).loc
-        } else {
-            point
-        }
-    }
-
     fn add_popup(
         &mut self,
         env: &Environment<Env>,
@@ -488,11 +479,11 @@ impl WrapperSpace for SimpleWrapperSpace {
         self.popup_manager.track_popup(PopupKind::Xdg(s_surface.clone())).unwrap();
         self.popup_manager.commit(&wl_surface);
 
-
+        // dbg!(s.bbox().loc);
         positioner.set_size(rect_size.w, rect_size.h);
         positioner.set_anchor_rect(
-            anchor_rect.loc.x + s.geometry().loc.x,
-            anchor_rect.loc.y + s.geometry().loc.y,
+            anchor_rect.loc.x + s.bbox().loc.x,
+            anchor_rect.loc.y + s.bbox().loc.y,
             anchor_rect.size.w,
             anchor_rect.size.h,
         );
@@ -637,7 +628,7 @@ impl WrapperSpace for SimpleWrapperSpace {
         display: &mut DisplayHandle,
     ) -> Result<Vec<UnixStream>, anyhow::Error> {
         if self.child.is_none() {
-            let (client, sockets) = get_client_sock(display);
+            let (client, client_sock) = get_client_sock(display);
             self.client = Some(client);
             // TODO how slow is this? Would it be worth using a faster method of comparing strings?
             self.child = Some(
@@ -646,18 +637,6 @@ impl WrapperSpace for SimpleWrapperSpace {
                         if Some(OsString::from(self.config.applet()).as_os_str())
                             == path.file_stem()
                         {
-                            let raw_fd = sockets.as_raw_fd();
-                            let fd_flags = fcntl::FdFlag::from_bits(
-                                fcntl::fcntl(raw_fd, fcntl::FcntlArg::F_GETFD).unwrap(),
-                            )
-                                .unwrap();
-                            fcntl::fcntl(
-                                raw_fd,
-                                fcntl::FcntlArg::F_SETFD(
-                                    fd_flags.difference(fcntl::FdFlag::FD_CLOEXEC),
-                                ),
-                            )
-                                .unwrap();
                             fs::read_to_string(&path).ok().and_then(|bytes| {
                                 if let Ok(entry) = DesktopEntry::decode(&path, &bytes) {
                                     if let Some(exec) = entry.exec() {
@@ -667,7 +646,7 @@ impl WrapperSpace for SimpleWrapperSpace {
                                             exec,
                                             Some(self.config.name()),
                                             self.log.as_ref().unwrap().clone(),
-                                            raw_fd,
+                                            client_sock.as_raw_fd(),
                                             requests_host_wayland_display,
                                         ));
                                     }
@@ -680,7 +659,7 @@ impl WrapperSpace for SimpleWrapperSpace {
                     })
                     .expect("Failed to spawn client..."),
             );
-            Ok(vec![sockets])
+            Ok(vec![client_sock])
         } else {
             bail!("Clients have already been spawned!");
         }
