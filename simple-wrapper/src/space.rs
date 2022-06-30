@@ -42,11 +42,11 @@ use smithay::{
                 self,
                 egl::{GetConfigAttrib, SwapInterval},
             },
-            surface::EGLSurface,
+            surface::EGLSurface, self,
         },
         renderer::{
             Bind, Frame, gles2::Gles2Renderer, ImportEgl, Renderer, Unbind,
-            utils::draw_surface_tree,
+            utils::draw_surface_tree, ImportDma,
         },
     },
     desktop::{
@@ -426,6 +426,10 @@ impl WrapperSpace for SimpleWrapperSpace {
         self.last_dirty.unwrap_or_else(|| Instant::now())
     }
 
+    fn popups(&self) -> &[Popup] {
+        &self.popups
+    }
+
     fn handle_button(&mut self, c_focused_surface: &c_wl_surface::WlSurface) {
         if self.focused_surface.borrow().is_none()
             && **self.layer_shell_wl_surface.as_ref().unwrap() == *c_focused_surface
@@ -449,7 +453,8 @@ impl WrapperSpace for SimpleWrapperSpace {
 
     fn point_to_compositor_space(&self, c_wl_surface: &c_wl_surface::WlSurface, point: Point<i32, Logical>) -> Point<i32, Logical> {
         if let Some(p) = self.popups.iter().find(|p| p.c_wl_surface == *c_wl_surface) {
-            bbox_from_surface_tree(p.s_surface.wl_surface(), point).loc
+            // dbg!(PopupKind::Xdg(p.s_surface.clone()).geometry(), &point);
+            bbox_from_surface_tree(p.s_surface.wl_surface(), point + p.position).loc
         } else {
             point
         }
@@ -480,7 +485,7 @@ impl WrapperSpace for SimpleWrapperSpace {
 
         let wl_surface = s_surface.wl_surface().clone();
         let s_popup_surface = s_surface.clone();
-        let _ = self.popup_manager.track_popup(PopupKind::Xdg(s_surface.clone()));
+        self.popup_manager.track_popup(PopupKind::Xdg(s_surface.clone())).unwrap();
         self.popup_manager.commit(&wl_surface);
 
 
@@ -577,6 +582,7 @@ impl WrapperSpace for SimpleWrapperSpace {
             egl_surface,
             dirty: false,
             popup_state: cur_popup_state,
+            position: (0,0).into(),
         });
     }
 
@@ -949,5 +955,32 @@ impl WrapperSpace for SimpleWrapperSpace {
             p.dirty = true;
             self.popup_manager.commit(s);
         }
+    }
+
+    fn bind_display(&mut self, _dh: &DisplayHandle) -> anyhow::Result<()> {
+        // let renderer = self.renderer.as_mut().unwrap();
+        // let bind_result = renderer.bind_wl_display(&dh);
+        // match &bind_result {
+        //     Ok(_) => {
+        //         slog_scope::info!("EGL hardware-acceleration enabled");
+        //         // let dmabuf_formats = renderer
+        //         //     .dmabuf_formats()
+        //         //     .cloned()
+        //         //     .collect::<Vec<_>>();
+        //         // init_dmabuf_global(
+        //         //     dh,
+        //         //     dmabuf_formats,
+        //         //     move |buffer, _| {
+        //         //         renderer
+        //         //             .import_dmabuf(buffer, None)
+        //         //             .is_ok()
+        //         //     },
+        //         //     None,
+        //         // );
+        //     }
+        //     Err(err) => slog_scope::warn!("Unable to initialize bind display to EGL: {}", err),
+        // };
+        // Ok(bind_result?)
+        Ok(())
     }
 }
