@@ -11,7 +11,6 @@ use std::{
 };
 
 use anyhow::bail;
-use arrayvec::ArrayVec;
 use freedesktop_desktop_entry::{self, DesktopEntry, Iter};
 use itertools::Itertools;
 use libc::c_int;
