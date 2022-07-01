@@ -7,10 +7,11 @@ use std::{
     os::unix::{net::UnixStream, prelude::AsRawFd},
     process::Child,
     rc::Rc,
-    time::Instant,
+    time::Instant, collections::VecDeque,
 };
 
 use anyhow::bail;
+use arrayvec::ArrayVec;
 use freedesktop_desktop_entry::{self, DesktopEntry, Iter};
 use itertools::Itertools;
 use libc::c_int;
@@ -60,7 +61,7 @@ use smithay::{
         self, Client, Display as s_Display, DisplayHandle,
         protocol::wl_surface::WlSurface as s_WlSurface,
     }},
-    utils::{Logical, Rectangle, Size, Point},
+    utils::{Logical, Rectangle, Size, Point, Physical},
     wayland::{
         SERIAL_COUNTER,
         shell::xdg::{PopupSurface, PositionerState},
@@ -101,6 +102,7 @@ impl Default for SimpleWrapperSpace {
             egl_surface: Default::default(),
             layer_shell_wl_surface: Default::default(),
             popups: Default::default(),
+            w_accumulated_damage: Default::default(),
         }
     }
 }
@@ -133,7 +135,8 @@ pub struct SimpleWrapperSpace {
     pub(crate) layer_surface: Option<Main<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>>,
     pub(crate) egl_surface: Option<Rc<EGLSurface>>,
     pub(crate) layer_shell_wl_surface: Option<Attached<c_wl_surface::WlSurface>>,
-    pub(crate) popups: Vec<Popup>
+    pub(crate) popups: Vec<Popup>,
+    pub(crate) w_accumulated_damage: VecDeque<Vec<Rectangle<i32, Physical>>>,
 }
 
 impl SimpleWrapperSpace {
@@ -170,7 +173,7 @@ impl SimpleWrapperSpace {
         (w.try_into().unwrap(), h.try_into().unwrap()).into()
     }
 
-    fn render(&mut self, dh: &DisplayHandle, time: u32) -> Result<(), RenderError<Gles2Renderer>> {
+    fn render(&mut self, time: u32) -> Result<(), RenderError<Gles2Renderer>> {
         if self.next_render_event.get() != None {
             return Ok(());
         }
@@ -192,7 +195,7 @@ impl SimpleWrapperSpace {
             // frame size could be bigger than the maximum the output_geo would define.
             let output_geo = Rectangle::from_loc_and_size(o.current_location(), output_size.to_logical(1));
 
-            let mut damage = if self.full_clear {
+            let cur_damage = if self.full_clear {
                 vec![(Rectangle::from_loc_and_size((0, 0), self.dimensions.to_physical(1)))]
             } else {
                 let mut acc_damage = self.space.windows().fold(vec![], |acc, w| {
@@ -225,6 +228,11 @@ impl SimpleWrapperSpace {
                 acc_damage
             };
 
+            let mut damage = Self::damage_for_buffer(cur_damage, &mut self.w_accumulated_damage, self.egl_surface.as_ref().unwrap());
+            if damage.is_empty() {
+                damage.push(Rectangle::from_loc_and_size((0, 0), self.dimensions.to_physical(1)));
+            }
+
             let _ = renderer.render(
                 self.dimensions.to_physical(1),
                 smithay::utils::Transform::Flipped180,
@@ -240,7 +248,6 @@ impl SimpleWrapperSpace {
                         }
 
                         let _ = draw_window(
-                            dh,
                             renderer,
                             frame,
                             w,
@@ -253,10 +260,10 @@ impl SimpleWrapperSpace {
                 },
             );
             self.egl_surface
-                .as_ref()
-                .unwrap()
-                .swap_buffers(Some(&mut damage))
-                .expect("Failed to swap buffers.");
+            .as_ref()
+            .unwrap()
+            .swap_buffers(Some(&mut damage))
+            .expect("Failed to swap buffers.");
 
             // Popup rendering
             for p in self.popups.iter_mut().filter(|p| 
@@ -270,13 +277,18 @@ impl SimpleWrapperSpace {
                 .bind(p.egl_surface.clone())
                 .expect("Failed to bind surface to GL");
                 let p_bbox = bbox_from_surface_tree(p.s_surface.wl_surface(), (0,0));
-                let mut damage = if self.full_clear {
+                let cur_damage = if self.full_clear {
                     vec![p_bbox.to_physical(1)]
                 } else {
                     damage_from_surface_tree(p.s_surface.wl_surface(), p_bbox.loc.to_f64().to_physical(1.0), 1.0, Some((&self.space, &o)))
                 };
-                if damage.len() == 0 {
+                if cur_damage.len() == 0 {
                     continue;
+                }
+
+                let mut damage = Self::damage_for_buffer(cur_damage, &mut p.accumulated_damage, &p.egl_surface);
+                if damage.is_empty() {
+                    damage.push(p_bbox.to_physical(1));
                 }
 
                 let _ = renderer.render(
@@ -287,9 +299,7 @@ impl SimpleWrapperSpace {
                             .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
                             .expect("Failed to clear frame.");
 
-
                         let _ = draw_surface_tree(
-                            dh,
                             renderer,
                             frame,
                             p.s_surface.wl_surface(),
@@ -311,6 +321,25 @@ impl SimpleWrapperSpace {
         let _ = renderer.unbind();
         self.full_clear = false;
         Ok(())
+    }
+
+    fn damage_for_buffer(cur_damage: Vec<Rectangle<i32, Physical>>, acc_damage: &mut VecDeque<Vec<Rectangle<i32, Physical>>>, egl_surface: &Rc<EGLSurface>) -> Vec<Rectangle<i32, Physical>> {
+        let age: usize = egl_surface.buffer_age().unwrap_or_default().try_into().unwrap_or_default();
+        let dmg_counts = acc_damage.len();
+        acc_damage.push_front(cur_damage);
+        // dbg!(age, dmg_counts);
+
+        let ret = if age == 0 || age > dmg_counts {
+            Vec::new()
+        } else {
+             acc_damage.range(0..age).cloned().flatten().collect_vec()
+        };
+
+        if acc_damage.len() > 4 {
+            acc_damage.drain(4..);
+        }
+
+        ret
     }
 }
 
@@ -417,7 +446,7 @@ impl WrapperSpace for SimpleWrapperSpace {
         });
 
         if should_render {
-            let _ = self.render(dh, time);
+            let _ = self.render(time);
         }
         if self.egl_surface.as_ref().unwrap().get_size() != Some(self.dimensions.to_physical(1)) {
             self.full_clear = true;
@@ -574,6 +603,7 @@ impl WrapperSpace for SimpleWrapperSpace {
             dirty: false,
             popup_state: cur_popup_state,
             position: (0,0).into(),
+            accumulated_damage: Default::default(),
         });
     }
 
