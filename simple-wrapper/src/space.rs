@@ -937,15 +937,15 @@ impl WrapperSpace for SimpleWrapperSpace {
     }
 
     fn bind_display(&mut self, dh: &DisplayHandle) -> anyhow::Result<()> {
-        let renderer = self.renderer.as_mut().unwrap();
-        let bind_result = renderer.bind_wl_display(dh);
-        match &bind_result {
-            Ok(_) => {
-                slog_scope::info!("EGL hardware-acceleration enabled");
-            }
-            Err(err) => slog_scope::warn!("Unable to initialize bind display to EGL: {}", err),
-        };
-        Ok(bind_result?)
-        // Ok(())
+        // let renderer = self.renderer.as_mut().unwrap();
+        // let bind_result = renderer.bind_wl_display(dh);
+        // match &bind_result {
+        //     Ok(_) => {
+        //         slog_scope::info!("EGL hardware-acceleration enabled");
+        //     }
+        //     Err(err) => slog_scope::warn!("Unable to initialize bind display to EGL: {}", err),
+        // };
+        // Ok(bind_result?)
+        Ok(())
     }
 }
