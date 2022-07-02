@@ -897,6 +897,8 @@ impl WrapperSpace for SimpleWrapperSpace {
     }
 
     fn dirty_window(&mut self, s: &s_WlSurface) {
+        self.last_dirty = Some(Instant::now());
+
         if let Some(w) = self.space.window_for_surface(s, WindowSurfaceType::ALL) {
             let size = self.constrain_dim(w.bbox().size);
             let activated = match w.toplevel() {
@@ -959,6 +961,8 @@ impl WrapperSpace for SimpleWrapperSpace {
     }
 
     fn dirty_popup(&mut self, s: &s_WlSurface) {
+        self.last_dirty = Some(Instant::now());
+
         if let Some(p) = self.popups.iter_mut().find(|p| p.s_surface.wl_surface() == s) {
             p.dirty = true;
             self.popup_manager.commit(s);
