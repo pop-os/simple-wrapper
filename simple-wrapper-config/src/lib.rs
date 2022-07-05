@@ -5,12 +5,12 @@ use std::fs::File;
 use std::ops::Range;
 
 use anyhow::Result;
-use sctk::reexports::protocols::wlr::unstable::layer_shell::v1::client::{
+use wayland_protocols::wlr::unstable::layer_shell::v1::client::{
     zwlr_layer_shell_v1, zwlr_layer_surface_v1,
 };
 use serde::{Deserialize, Serialize};
 use xdg::BaseDirectories;
-use xdg_shell_wrapper::config::{KeyboardInteractivity, Layer, WrapperConfig};
+use xdg_shell_wrapper_config::{KeyboardInteractivity, Layer, WrapperConfig};
 
 /// Edge to which the panel is anchored
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]

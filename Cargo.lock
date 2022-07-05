@@ -714,20 +714,11 @@ name = "simple-wrapper-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "calloop",
- "itertools",
- "libc",
- "nix 0.24.1",
- "once_cell",
  "ron",
  "serde",
- "slog",
- "smithay",
- "smithay-client-toolkit",
- "tempfile",
- "wayland-egl",
+ "wayland-protocols 0.29.4",
  "xdg",
- "xdg-shell-wrapper",
+ "xdg-shell-wrapper-config",
 ]
 
 [[package]]
@@ -1188,6 +1179,15 @@ dependencies = [
  "smithay-client-toolkit",
  "tempfile",
  "wayland-egl",
+ "xdg-shell-wrapper-config",
+]
+
+[[package]]
+name = "xdg-shell-wrapper-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wayland-protocols 0.29.4",
 ]
 
 [[package]]
