@@ -9,6 +9,7 @@ use std::{
     rc::Rc,
     time::Instant, collections::VecDeque,
 };
+use std::thread::spawn;
 
 use anyhow::bail;
 use freedesktop_desktop_entry::{self, DesktopEntry, Iter};
@@ -380,7 +381,7 @@ impl WrapperSpace for SimpleWrapperSpace {
                 for w in self.space.windows() {
                     w.configure();
                 }
-                self.dirty_window(w.toplevel().wl_surface());
+                self.dirty_window(&dh, w.toplevel().wl_surface());
             } else if self.last_dirty.is_some() {
                 info!(
                     self.log.as_ref().unwrap().clone(),
@@ -466,7 +467,7 @@ impl WrapperSpace for SimpleWrapperSpace {
         }
     }
 
-    fn add_top_level(&mut self, w: Window) {
+    fn add_window(&mut self, w: Window) {
         self.full_clear = true;
         let wl_surface = w.toplevel().wl_surface().clone();
         self.space.map_window(&w, (0, 0), true);
@@ -896,9 +897,10 @@ impl WrapperSpace for SimpleWrapperSpace {
         self.space.raise_window(w, activate);
     }
 
-    fn dirty_window(&mut self, s: &s_WlSurface) {
+    fn dirty_window(&mut self, dh: &DisplayHandle, s: &s_WlSurface) {
+        self.space.commit(&s);
+        self.space.refresh(&dh);
         self.last_dirty = Some(Instant::now());
-
         if let Some(w) = self.space.window_for_surface(s, WindowSurfaceType::ALL) {
             let size = self.constrain_dim(w.bbox().size);
             let activated = match w.toplevel() {
@@ -960,7 +962,9 @@ impl WrapperSpace for SimpleWrapperSpace {
         }
     }
 
-    fn dirty_popup(&mut self, s: &s_WlSurface) {
+    fn dirty_popup(&mut self, dh: &DisplayHandle, s: &s_WlSurface) {
+        self.space.commit(&s);
+        self.space.refresh(&dh);
         self.last_dirty = Some(Instant::now());
 
         if let Some(p) = self.popups.iter_mut().find(|p| p.s_surface.wl_surface() == s) {
