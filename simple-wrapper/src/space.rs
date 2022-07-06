@@ -470,7 +470,7 @@ impl WrapperSpace for SimpleWrapperSpace {
     fn add_window(&mut self, w: Window) {
         self.full_clear = true;
         let wl_surface = w.toplevel().wl_surface().clone();
-        self.space.map_window(&w, (0, 0), true);
+        self.space.map_window(&w, (0, 0), self.z_index().map(|z| z as u8),true);
         self.space.raise_window(&w, true);
         for w in self.space.windows() {
             w.configure();
