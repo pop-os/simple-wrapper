@@ -1165,6 +1165,7 @@ dependencies = [
 [[package]]
 name = "xdg-shell-wrapper"
 version = "0.1.0"
+source = "git+https://github.com/pop-os/xdg-shell-wrapper#e523530fd900ae1985e664cce84c4066b23afea1"
 dependencies = [
  "anyhow",
  "calloop",
@@ -1185,6 +1186,7 @@ dependencies = [
 [[package]]
 name = "xdg-shell-wrapper-config"
 version = "0.1.0"
+source = "git+https://github.com/pop-os/xdg-shell-wrapper#e523530fd900ae1985e664cce84c4066b23afea1"
 dependencies = [
  "serde",
  "wayland-protocols 0.29.4",

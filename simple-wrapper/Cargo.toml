@@ -25,5 +25,5 @@ xdg = "2.4.0"
 itertools = "0.10.3"
 wayland-egl = "0.29.4"
 simple-wrapper-config = { path = "../simple-wrapper-config" }
-# xdg-shell-wrapper = { git = "https://github.com/pop-os/xdg-shell-wrapper", branch = "rework-0.30"}
-xdg-shell-wrapper = { path = "../../xdg-shell-wrapper"}
+xdg-shell-wrapper = { git = "https://github.com/pop-os/xdg-shell-wrapper" }
+#xdg-shell-wrapper = { path = "../../xdg-shell-wrapper"}
