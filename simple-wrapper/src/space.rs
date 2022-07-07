@@ -7,7 +7,7 @@ use std::{
     os::unix::{net::UnixStream, prelude::AsRawFd},
     process::Child,
     rc::Rc,
-    time::Instant, collections::VecDeque,
+    time::Instant
 };
 use std::thread::spawn;
 
@@ -136,7 +136,7 @@ pub struct SimpleWrapperSpace {
     pub(crate) egl_surface: Option<Rc<EGLSurface>>,
     pub(crate) layer_shell_wl_surface: Option<Attached<c_wl_surface::WlSurface>>,
     pub(crate) popups: Vec<Popup>,
-    pub(crate) w_accumulated_damage: VecDeque<Vec<Rectangle<i32, Physical>>>,
+    pub(crate) w_accumulated_damage: Vec<Vec<Rectangle<i32, Physical>>>,
 }
 
 impl SimpleWrapperSpace {
@@ -228,42 +228,42 @@ impl SimpleWrapperSpace {
                 acc_damage
             };
 
-            let mut damage = Self::damage_for_buffer(cur_damage, &mut self.w_accumulated_damage, self.egl_surface.as_ref().unwrap());
-            if damage.is_empty() {
-                damage.push(Rectangle::from_loc_and_size((0, 0), self.dimensions.to_physical(1)));
-            }
+            if let Some(mut damage) = Self::damage_for_buffer(cur_damage, &mut self.w_accumulated_damage, self.egl_surface.as_ref().unwrap()) {
+                if damage.is_empty() {
+                    damage.push(Rectangle::from_loc_and_size((0, 0), self.dimensions.to_physical(1)));
+                }
+                let _ = renderer.render(
+                    self.dimensions.to_physical(1),
+                    smithay::utils::Transform::Flipped180,
+                    |renderer: &mut Gles2Renderer, frame| {
+                        frame
+                            .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
+                            .expect("Failed to clear frame.");
+                        for w in self.space.windows() {
+                            let mut w_damage = damage.iter().filter_map(|r| r.intersection(w.bbox().to_physical(1))).collect_vec();
+                            w_damage.dedup();
+                            if damage.len() == 0 {
+                                continue;
+                            }
 
-            let _ = renderer.render(
-                self.dimensions.to_physical(1),
-                smithay::utils::Transform::Flipped180,
-                |renderer: &mut Gles2Renderer, frame| {
-                    frame
-                        .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
-                        .expect("Failed to clear frame.");
-                    for w in self.space.windows() {
-                        let mut w_damage = damage.iter().filter_map(|r| r.intersection(w.bbox().to_physical(1))).collect_vec();
-                        w_damage.dedup();
-                        if damage.len() == 0 {
-                            continue;
+                            let _ = draw_window(
+                                renderer,
+                                frame,
+                                w,
+                                1.0,
+                                w.geometry().loc.to_f64().to_physical(1.0),
+                                &w_damage,
+                                &log_clone,
+                            );
                         }
-
-                        let _ = draw_window(
-                            renderer,
-                            frame,
-                            w,
-                            1.0,
-                            w.geometry().loc.to_f64().to_physical(1.0),
-                            &w_damage,
-                            &log_clone,
-                        );
-                    }
-                },
-            );
-            self.egl_surface
-            .as_ref()
-            .unwrap()
-            .swap_buffers(Some(&mut damage))
-            .expect("Failed to swap buffers.");
+                    },
+                );
+                self.egl_surface
+                    .as_ref()
+                    .unwrap()
+                    .swap_buffers(Some(&mut damage))
+                    .expect("Failed to swap buffers.");
+            }
 
             // Popup rendering
             for p in self.popups.iter_mut().filter(|p| 
@@ -282,39 +282,37 @@ impl SimpleWrapperSpace {
                 } else {
                     damage_from_surface_tree(p.s_surface.wl_surface(), p_bbox.loc.to_f64().to_physical(1.0), 1.0, Some((&self.space, &o)))
                 };
-                if cur_damage.len() == 0 {
-                    continue;
+
+                if let Some(mut damage) = Self::damage_for_buffer(cur_damage, &mut p.accumulated_damage, &p.egl_surface) {
+                    if damage.is_empty() {
+                        damage.push(p_bbox.to_physical(1));
+                    }
+
+                    let _ = renderer.render(
+                        p_bbox.size.to_physical(1),
+                        smithay::utils::Transform::Flipped180,
+                        |renderer: &mut Gles2Renderer, frame| {
+                            frame
+                                .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
+                                .expect("Failed to clear frame.");
+
+                            let _ = draw_surface_tree(
+                                renderer,
+                                frame,
+                                p.s_surface.wl_surface(),
+                                1.0,
+                                p_bbox.loc.to_f64().to_physical(1.0),
+                                &damage,
+                                &log_clone,
+                            );
+                        },
+                    );
+                    p.egl_surface
+                        .swap_buffers(Some(&mut damage))
+                        .expect("Failed to swap buffers.");
+                    p.dirty = false;
                 }
-
-                let mut damage = Self::damage_for_buffer(cur_damage, &mut p.accumulated_damage, &p.egl_surface);
-                if damage.is_empty() {
-                    damage.push(p_bbox.to_physical(1));
-                }
-
-                let _ = renderer.render(
-                    p_bbox.size.to_physical(1),
-                    smithay::utils::Transform::Flipped180,
-                    |renderer: &mut Gles2Renderer, frame| {
-                        frame
-                            .clear(clear_color, damage.iter().cloned().collect_vec().as_slice())
-                            .expect("Failed to clear frame.");
-
-                        let _ = draw_surface_tree(
-                            renderer,
-                            frame,
-                            p.s_surface.wl_surface(),
-                            1.0,
-                            p_bbox.loc.to_f64().to_physical(1.0),
-                            &damage,
-                            &log_clone,
-                        );
-                    },
-                );
-                p.egl_surface
-                .swap_buffers(Some(&mut damage))
-                .expect("Failed to swap buffers.");
-                p.dirty = false;
-            }
+           }
         }
 
         self.space.send_frames(time);
@@ -323,22 +321,33 @@ impl SimpleWrapperSpace {
         Ok(())
     }
 
-    fn damage_for_buffer(cur_damage: Vec<Rectangle<i32, Physical>>, acc_damage: &mut VecDeque<Vec<Rectangle<i32, Physical>>>, egl_surface: &Rc<EGLSurface>) -> Vec<Rectangle<i32, Physical>> {
-        let age: usize = egl_surface.buffer_age().unwrap_or_default().try_into().unwrap_or_default();
+    fn damage_for_buffer(cur_damage: Vec<Rectangle<i32, Physical>>, acc_damage: &mut Vec<Vec<Rectangle<i32, Physical>>>, egl_surface: &Rc<EGLSurface>) -> Option<Vec<Rectangle<i32, Physical>>> {
+        let mut age: usize = egl_surface.buffer_age().unwrap_or_default().try_into().unwrap_or_default();
         let dmg_counts = acc_damage.len();
-        acc_damage.push_front(cur_damage);
-        // dbg!(age, dmg_counts);
 
         let ret = if age == 0 || age > dmg_counts {
-            Vec::new()
+            Some(Vec::new())
         } else {
-             acc_damage.range(0..age).cloned().flatten().collect_vec()
+            if !cur_damage.is_empty() {
+                acc_damage.push(cur_damage);
+                age += 1;
+            }
+            let mut d = acc_damage.clone();
+            d.reverse();
+            let d = d[..age+1].into_iter().map(|v| v.into_iter().cloned()).flatten().collect_vec();
+            if d.is_empty() {
+                // pop front because it won't actually be used
+                None
+            } else {
+                Some(d)
+            }
         };
 
         if acc_damage.len() > 4 {
-            acc_damage.drain(4..);
+            acc_damage.drain(..acc_damage.len() - 4);
         }
 
+        // dbg!(age, dmg_counts, &acc_damage, &ret);
         ret
     }
 }
